@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Azure.CognitiveServices.Vision.Face;
 using Microsoft.Azure.CognitiveServices.Vision.Face.Models;
 using Orneholm.CognitiveWorkbench.Web.Models.Face;
@@ -42,28 +44,121 @@ namespace Orneholm.CognitiveWorkbench.Web.Services
             };
         }
 
-        public async Task<FaceAnalyzeResponse> Analyze(string url, FaceDetectionModel detectionModel, bool enableIdentification, FaceRecognitionModel recognitionModel, FaceIdentificationGroupType identificationGroupType, string identificationGroupId)
+        public async Task<FaceAnalyzeResponse> AnalyzeAsync(string imageUrl, IFormFile file, 
+            FaceDetectionModel detectionModel, bool enableIdentification, FaceRecognitionModel recognitionModel, 
+            FaceIdentificationGroupType identificationGroupType, string identificationGroupId)
         {
             // Face
-            var face = FaceProcess(url, detectionModel, enableIdentification, recognitionModel, identificationGroupType, identificationGroupId);
-            var imageInfo = ImageInfoProcessor.GetImageInfo(url, _httpClientFactory);
-
-            // Combine
-            await Task.WhenAll(face, imageInfo);
-
-            return new FaceAnalyzeResponse
+            if (!string.IsNullOrWhiteSpace(imageUrl))
             {
-                ImageInfo = imageInfo.Result,
-                FaceResult = face.Result
-            };
+                var face = FaceProcessByUrlAsync(imageUrl, detectionModel, enableIdentification, recognitionModel, identificationGroupType, identificationGroupId);
+                var imageInfo = ImageInfoProcessor.GetImageInfoFromImageUrlAsync(imageUrl, _httpClientFactory);
+
+                // Combine
+                await Task.WhenAll(face, imageInfo);
+
+                return new FaceAnalyzeResponse
+                {
+                    ImageInfo = imageInfo.Result,
+                    FaceResult = face.Result
+                };
+            }
+            else
+            {
+                using (var analyzeStream = new MemoryStream())
+                using (var outputStream = new MemoryStream())
+                {
+                    // Get initial value
+                    await file.CopyToAsync(analyzeStream);
+
+                    analyzeStream.Seek(0, SeekOrigin.Begin);
+                    await analyzeStream.CopyToAsync(outputStream);
+
+                    // Reset the stream for consumption
+                    analyzeStream.Seek(0, SeekOrigin.Begin);
+                    outputStream.Seek(0, SeekOrigin.Begin);
+                    
+                    var face = await FaceProcessByStreamAsync(analyzeStream, detectionModel, enableIdentification, recognitionModel, identificationGroupType, identificationGroupId);
+                    var imageInfo = ImageInfoProcessor.GetImageInfoFromStream(outputStream, file.ContentType);
+
+                    return new FaceAnalyzeResponse
+                    {
+                        ImageInfo = imageInfo,
+                        FaceResult = face
+                    };
+                }
+            }
         }
 
-        private async Task<List<FaceAnalyzeItem>> FaceProcess(string url, FaceDetectionModel detectionModel, bool enableIdentification, FaceRecognitionModel recognitionModel, FaceIdentificationGroupType identificationGroupType, string identificationGroupId)
+        private async Task<List<FaceAnalyzeItem>> FaceProcessByUrlAsync(string imageUrl, FaceDetectionModel detectionModel, bool enableIdentification, FaceRecognitionModel recognitionModel, FaceIdentificationGroupType identificationGroupType, string identificationGroupId)
         {
-            // Detect faces
-            var detectedFaces = await FaceDetectAsync(url, detectionModel, enableIdentification, recognitionModel);
-            var unidentifiedResults = detectedFaces.Select(f => new FaceAnalyzeItem { DetectedFace = f }).ToList();
+            var returnFaceId = false;
+            var returnFaceLandmarks = true;
+            var returnFaceAttributes = FaceAttributes;
+            var targetRecognitionModel = FaceRecognitionModel.recognition_01;
+           
+            if (FaceDetectionModel.detection_02.Equals(detectionModel))
+            {
+                returnFaceLandmarks = false;
+                returnFaceAttributes = new List<FaceAttributeType?>();
+            }
 
+            if (enableIdentification)
+            {
+                returnFaceId = true;
+                targetRecognitionModel = recognitionModel;
+            }
+
+            var detectedFaces = await _faceClient.Face.DetectWithUrlAsync(
+                imageUrl,
+                returnFaceId: returnFaceId,
+                returnFaceLandmarks: returnFaceLandmarks,
+                returnFaceAttributes: returnFaceAttributes,
+                recognitionModel: targetRecognitionModel.ToString(),
+                returnRecognitionModel: true,
+                detectionModel: detectionModel.ToString()
+            );
+
+            // Process detected faces
+            return await DetectedFacesProcessAsync(detectedFaces, detectionModel, enableIdentification, recognitionModel, identificationGroupType, identificationGroupId);
+        }
+
+        private async Task<List<FaceAnalyzeItem>> FaceProcessByStreamAsync(Stream imageStream, FaceDetectionModel detectionModel, bool enableIdentification, FaceRecognitionModel recognitionModel, FaceIdentificationGroupType identificationGroupType, string identificationGroupId)
+        {
+            var returnFaceId = false;
+            var returnFaceLandmarks = true;
+            var returnFaceAttributes = FaceAttributes;
+            var targetRecognitionModel = FaceRecognitionModel.recognition_01;
+           
+            if (FaceDetectionModel.detection_02.Equals(detectionModel))
+            {
+                returnFaceLandmarks = false;
+                returnFaceAttributes = new List<FaceAttributeType?>();
+            }
+
+            if (enableIdentification)
+            {
+                returnFaceId = true;
+                targetRecognitionModel = recognitionModel;
+            }
+
+            var detectedFaces = await _faceClient.Face.DetectWithStreamAsync(
+                imageStream,
+                returnFaceId: returnFaceId,
+                returnFaceLandmarks: returnFaceLandmarks,
+                returnFaceAttributes: returnFaceAttributes,
+                recognitionModel: targetRecognitionModel.ToString(),
+                returnRecognitionModel: true,
+                detectionModel: detectionModel.ToString()
+            );
+        
+            // Process detected faces
+            return await DetectedFacesProcessAsync(detectedFaces, detectionModel, enableIdentification, recognitionModel, identificationGroupType, identificationGroupId);
+        }
+
+        private async Task<List<FaceAnalyzeItem>> DetectedFacesProcessAsync(IList<DetectedFace> detectedFaces, FaceDetectionModel detectionModel, bool enableIdentification, FaceRecognitionModel recognitionModel, FaceIdentificationGroupType identificationGroupType, string identificationGroupId)
+        {
+            var unidentifiedResults = detectedFaces.Select(f => new FaceAnalyzeItem { DetectedFace = f }).ToList();
             if (!enableIdentification || detectedFaces.Count == 0)
             {
                 return unidentifiedResults;
@@ -144,36 +239,6 @@ namespace Orneholm.CognitiveWorkbench.Web.Services
             var identifiedFaces = identificationResults.SelectMany(i => i).ToList();
 
             return identifiedFaces;
-        }
-
-        private async Task<IList<DetectedFace>> FaceDetectAsync(string url, FaceDetectionModel detectionModel, bool enableIdentification, FaceRecognitionModel recognitionModel)
-        {
-            var returnFaceId = false;
-            var returnFaceLandmarks = true;
-            var returnFaceAttributes = FaceAttributes;
-            var targetRecognitionModel = FaceRecognitionModel.recognition_01;
-           
-            if (FaceDetectionModel.detection_02.Equals(detectionModel))
-            {
-                returnFaceLandmarks = false;
-                returnFaceAttributes = new List<FaceAttributeType?>();
-            }
-
-            if (enableIdentification)
-            {
-                returnFaceId = true;
-                targetRecognitionModel = recognitionModel;
-            }
-
-            return await _faceClient.Face.DetectWithUrlAsync(
-                url,
-                returnFaceId: returnFaceId,
-                returnFaceLandmarks: returnFaceLandmarks,
-                returnFaceAttributes: returnFaceAttributes,
-                recognitionModel: targetRecognitionModel.ToString(),
-                returnRecognitionModel: true,
-                detectionModel: detectionModel.ToString()
-            );
         }
 
         private async Task<IEnumerable<FaceAnalyzeItem>> FaceIdentifyAsync(IEnumerable<DetectedFace> detectedFaces, FaceIdentificationGroupType identificationGroupType, string identificationGroupId, IList<Person> identificationGroupPersons)
