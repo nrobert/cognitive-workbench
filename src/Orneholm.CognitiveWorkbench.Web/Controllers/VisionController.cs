@@ -18,6 +18,8 @@ namespace Orneholm.CognitiveWorkbench.Web.Controllers
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly TelemetryClient _telemetryClient;
 
+        private List<string> _allowedFileContentType = new List<string> { "image/jpeg", "image/png", "image/gif", "image/bmp" };
+
         public VisionController(ILogger<VisionController> logger, IHttpClientFactory httpClientFactory, TelemetryClient telemetryClient)
         {
             _logger = logger;
@@ -44,15 +46,15 @@ namespace Orneholm.CognitiveWorkbench.Web.Controllers
                 throw new ArgumentException("Missing or invalid ComputerVisionEndpoint", nameof(request.ComputerVisionEndpoint));
             }
 
-            if (string.IsNullOrWhiteSpace(request.ImageUrl))
+            if (string.IsNullOrWhiteSpace(request.ImageUrl) && (request.File == null || !_allowedFileContentType.Contains(request.File.ContentType)))
             {
-                throw new ArgumentException("Missing or invalid ImageUrl", nameof(request.ImageUrl));
+                throw new ArgumentException("Missing or invalid ImageUrl / no file provided", nameof(request.ImageUrl));
             }
 
             Track("Vision_ComputerVision");
 
             var imageAnalyzer = new ImageComputerVisionAnalyzer(request.ComputerVisionSubscriptionKey, request.ComputerVisionEndpoint, _httpClientFactory);
-            var analyzeResult = await imageAnalyzer.Analyze(request.ImageUrl, request.ImageAnalysisLanguage, request.ImageOcrLanguage, request.ImageReadV3Language);
+            var analyzeResult = await imageAnalyzer.Analyze(request.ImageUrl, request.File, request.ImageAnalysisLanguage, request.ImageOcrLanguage, request.ImageReadLanguage);
 
             return View(ComputerVisionViewModel.Analyzed(request, analyzeResult));
         }
